@@ -14,7 +14,7 @@ object Main {
     val inputFile= "/project2/lineorder_small.tbl"
     val output = "output"
 
-    val sparkConf = new SparkConf().setAppName("CS422-Project2")//.setMaster("local[16]")
+    val sparkConf = new SparkConf().setAppName("CS422-Project2").setMaster("local[16]")
     val ctx = new SparkContext(sparkConf)
     val sqlContext = new org.apache.spark.sql.SQLContext(ctx)
 
@@ -44,12 +44,12 @@ object Main {
        CUBE BY lo_suppkey, lo_shipmode, lo_orderdate
      */
 
-    //res.saveAsTextFile(output)
+    res.saveAsTextFile(output)
 
     //Perform the same query using SparkSQL
-    //    val q1 = df.cube("lo_suppkey","lo_shipmode","lo_orderdate")
-    //      .agg(sum("lo_supplycost") as "sum supplycost")
-    //    q1.show
+    val q1 = df.cube("lo_suppkey","lo_shipmode","lo_orderdate")
+      .agg(sum("lo_supplycost") as "sum supplycost")
+    q1.show
 
 
   }
