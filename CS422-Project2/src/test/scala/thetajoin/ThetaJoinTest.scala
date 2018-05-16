@@ -18,7 +18,7 @@ class ThetaJoinTest extends FlatSpec {
     val reducers = 10
     val maxInput = 1000 
     
-    val inputFile1="input1_1K.csv"
+    val inputFile1="test/resources/input1_1K.csv"
     val inputFile2="input2_1K.csv"
     
     val input1 = new File(getClass.getResource(inputFile1).getFile).getPath
