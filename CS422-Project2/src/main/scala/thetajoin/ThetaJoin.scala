@@ -18,34 +18,19 @@ class ThetaJoin(numR: Long, numS: Long, reducers: Int, bucketsize: Int) extends 
   var horizontalCounts = Array[Int]()
   var verticalCounts = Array[Int]()      
 
-  class Cell(verticalIndex:Int, horizontalIndex:Int, isCandidateCell:Boolean) {
+  class Cell(verticalIndex:Int, horizontalIndex:Int, isCandidateCell:Boolean) extends java.io.Serializable {
     def hIndex():Int=horizontalIndex
     def vIndex():Int=verticalIndex
     def isCandidate():Boolean=isCandidateCell
-
-    def contains(x: Int, fromR: Boolean): Boolean = {
-      var boundaries = verticalBoundaries
-      var index = verticalIndex
-      if (!fromR) {
-        boundaries = horizontalBoundaries
-        index = horizontalIndex
-      }
-
-      if (index == 0 && x < boundaries(0)) true
-      if (index == boundaries.length && x > boundaries.last) true
-      if (boundaries(index - 1) <= x && x < boundaries(index)) true
-
-      false
-    }
   }
 
-  class Region() {
+  class Region() extends java.io.Serializable {
     var num_cells = 0
     var cells = Array[Cell]()
     var cap = bucketsize
 
     def addCell(c: Cell) = {
-      cells(num_cells) = c
+      cells = cells :+ c
       num_cells += 1
       if(c.isCandidate()) cap = cap-1
     }
@@ -54,13 +39,6 @@ class ThetaJoin(numR: Long, numS: Long, reducers: Int, bucketsize: Int) extends 
       for (cell <- cells) {
         this.addCell(cell)
       }
-    }
-
-    def contains(x: Int, fromR: Boolean): Boolean = {
-      for (cell <- cells) {
-        if (cell.contains(x, fromR)) true
-      }
-      false
     }
 
     def capacity(): Int = cap
@@ -98,6 +76,27 @@ class ThetaJoin(numR: Long, numS: Long, reducers: Int, bucketsize: Int) extends 
     }
   }
 
+  def contains(c: Cell, x: Int, fromR: Boolean): Boolean = {
+    var boundaries = verticalBoundaries
+    var index = c.vIndex()
+    if (!fromR) {
+      boundaries = horizontalBoundaries
+      index = c.hIndex()
+    }
+
+    if (index == 0) {
+      if (x < boundaries(0)) return true
+      return false
+    }
+    if (index == boundaries.length) {
+      if (x > boundaries.last) return true
+      return false
+    }
+    if (boundaries(index - 1) <= x && x < boundaries(index)) return true
+
+    false
+  }
+
   /*
    * this method gets as input two datasets and the condition
    * and returns an RDD with the result by projecting only 
@@ -114,22 +113,21 @@ class ThetaJoin(numR: Long, numS: Long, reducers: Int, bucketsize: Int) extends 
     val index1 = schema1.indexOf(attr1)
     val index2 = schema2.indexOf(attr2)        
 
-    // TODO: int division?
     val cr = numR / math.sqrt(numR * numS / reducers)
     val cs = numS / math.sqrt(numR * numS / reducers)
 
     // Sample boundaries
-    verticalBoundaries = rdd1.sample(false, cr / numR).map(r => r.getInt(index1)).collect().sorted
-    horizontalBoundaries = rdd2.sample(false, cs / numS).map(r => r.getInt(index2)).collect().sorted
+    verticalBoundaries = rdd1.takeSample(false, math.round(cr).toInt).map(r => r.getInt(index1)).sorted
+    horizontalBoundaries = rdd2.takeSample(false, math.round(cs).toInt).map(r => r.getInt(index2)).sorted
 
     // Compute R histogram
     val r_counts = rdd1.map { r =>
         val r_val = r.getInt(index1)
         val value = 1
-        var key = verticalBoundaries.length
-        for (i <- 1 to verticalBoundaries.length) {
-          if (r_val < verticalBoundaries(i)) {
-            key = i
+        var key = 0
+        for (i <- verticalBoundaries.indices) {
+          if (r_val >= verticalBoundaries(i)) {
+            key = i+1
           }
         }
 
@@ -137,17 +135,17 @@ class ThetaJoin(numR: Long, numS: Long, reducers: Int, bucketsize: Int) extends 
       }
       .reduceByKey((a, b) =>  a + b).collect()
 
-    for (i <- 0 to verticalBoundaries.length) verticalCounts(i) = 0
+    for (i <- 0 to verticalBoundaries.length) verticalCounts = verticalCounts :+ 0
     for ((k,v) <- r_counts) verticalCounts(k) = v
 
     // Compute S histogram
     val s_counts = rdd2.map { s =>
       val s_val = s.getInt(index2)
       val value = 1
-      var key = horizontalBoundaries.length
-      for (i <- 1 to horizontalBoundaries.length) {
-        if (s_val < horizontalBoundaries(i)) {
-          key = i
+      var key = 0
+      for (i <- horizontalBoundaries.indices) {
+        if (s_val >= horizontalBoundaries(i)) {
+          key = i+1
         }
       }
 
@@ -155,30 +153,40 @@ class ThetaJoin(numR: Long, numS: Long, reducers: Int, bucketsize: Int) extends 
     }
     .reduceByKey((a, b) =>  a + b).collect()
 
-    for (i <- 0 to horizontalBoundaries.length + 1) horizontalCounts(i) = 0
+    for (i <- 0 to horizontalBoundaries.length) horizontalCounts = horizontalCounts :+ 0
     for ((k,v) <- s_counts) horizontalCounts(k) = v
 
     // Compute regions using M-Bucket-I
-    val best_regions = mBucketI()
+    val best_regions = mBucketI(op)
 
     if (best_regions == null) {
       throw new RuntimeException("Insufficient reducers, or maxInput too low")
     }
+
+    val check_cell_contains = (c: Cell, x: Int, fromR: Boolean) => contains(c, x, fromR)
+    val check_region_contains = (r: Region, x: Int, fromR: Boolean) => {
+      for (cell <- r.cells) {
+        if (check_cell_contains(cell, x, fromR)) true
+      }
+      false
+    }
+
+    rdd1.context.broadcast(best_regions)
 
     // Map rows to regions
     val r_regions = rdd1.map(row => row.getInt(index1))
       .map { value =>
         var ri = 0
         for (i <- best_regions.indices) {
-          if (best_regions(i).contains(value, true)) {ri = i}
+          if (check_region_contains(best_regions(i), value, true)) {ri = i}
         }
         (ri, value)
       }
-    var s_regions = rdd2.map(row => row.getInt(index2))
+    val s_regions = rdd2.map(row => row.getInt(index2))
       .map { value =>
         var ri = 0
         for (i <- best_regions.indices) {
-          if (best_regions(i).contains(value, true)) {ri = i}
+          if (check_region_contains(best_regions(i), value, true)) {ri = i}
         }
         (ri, value)
       }
@@ -194,14 +202,14 @@ class ThetaJoin(numR: Long, numS: Long, reducers: Int, bucketsize: Int) extends 
     }
   }
 
-  def mBucketI() : Array[Region] = {
+  def mBucketI(op: String) : Array[Region] = {
     var row = 0
     var r = reducers
 
     var regions = Array[Region]()
 
     while (row < verticalCounts.length) {
-      val out =  coverSubMatrix(row, r)
+      val out =  coverSubMatrix(row, r, op)
       row = out._1
       r = out._2
       // Union regions
@@ -213,16 +221,16 @@ class ThetaJoin(numR: Long, numS: Long, reducers: Int, bucketsize: Int) extends 
     regions
   }
 
-  def coverSubMatrix(row:Int, r:Int) : (Int, Int, Array[Region]) = {
+  def coverSubMatrix(row:Int, r:Int, op: String) : (Int, Int, Array[Region]) = {
     var max_score = -1
     var r_used = 0
-    var best_row = row + 1
+    var best_row = row
     var best_regions = Array[Region]()
 
-    var i = 1
+    var i = 0
     while (i < bucketsize && row + i < verticalCounts.length) {
-      val ri = coverRows(row, row + i)
-      val area = totalCandidateArea(row, row+i)
+      val ri = coverRows(row, row + i, op)
+      val area = totalCandidateArea(row, row+i, op)
       val score = area / ri.length
 
       if (score >= max_score) {
@@ -239,14 +247,14 @@ class ThetaJoin(numR: Long, numS: Long, reducers: Int, bucketsize: Int) extends 
     (best_row+1, r_remaining, best_regions)
   }
 
-  def coverRows(first:Int, last:Int) : Array[Region] = {
+  def coverRows(first:Int, last:Int, op: String) : Array[Region] = {
     var regions = List[Region]()
     var r = new Region()
 
     for (col <- horizontalCounts.indices) {
       var cells = Array[Cell]()
       for (row <- first to last) {
-        cells = cells ++ Array{new Cell(row, col, isCandidate(row, col))}
+        cells = cells ++ Array{new Cell(row, col, isCandidate(row, col, op))}
       }
 
       val numCandidates = cells.count(cell => cell.isCandidate())
@@ -257,6 +265,10 @@ class ThetaJoin(numR: Long, numS: Long, reducers: Int, bucketsize: Int) extends 
       }
 
       r.addCells(cells)
+    }
+
+    if (r.size() > 0) {
+      regions = regions :+r
     }
 
     regions.toArray
@@ -271,34 +283,61 @@ class ThetaJoin(numR: Long, numS: Long, reducers: Int, bucketsize: Int) extends 
     * 2 |__|_-|_-|_-|__|
     *
     */
-  def isCandidate(row: Int, col: Int): Boolean = {
-    // Edge Cases
-    if (row == 0 && col == 0) true
-    if (row == 0) verticalBoundaries(0) > horizontalBoundaries(col - 1)
-    if (col == 0) horizontalBoundaries(0) > verticalBoundaries(row - 1)
-    if (row == verticalBoundaries.length && col == horizontalBoundaries.length) true
-    if (row == verticalBoundaries.length) {
-      verticalBoundaries(verticalBoundaries.length - 1) < horizontalBoundaries(col)
+  def isCandidate(row: Int, col: Int, op: String): Boolean = {
+    if (row == 0 && col == 0) return true
+
+    op match {
+      case "=" => {
+        // Edge Cases
+        if (row == 0) return verticalBoundaries(0) > horizontalBoundaries(col - 1)
+        if (col == 0) return horizontalBoundaries(0) > verticalBoundaries(row - 1)
+        if (row == verticalBoundaries.length && col == horizontalBoundaries.length) return true
+        if (row == verticalBoundaries.length) {
+          return verticalBoundaries(verticalBoundaries.length - 1) < horizontalBoundaries(col)
+        }
+        if (col == horizontalBoundaries.length) {
+          return horizontalBoundaries(horizontalBoundaries.length - 1) < verticalBoundaries(row)
+        }
+
+        // General Case
+        val lowerR = verticalBoundaries(row - 1)
+        val upperR = verticalBoundaries(row)
+
+        val lowerC = horizontalBoundaries(col - 1)
+        val upperC = horizontalBoundaries(col)
+
+        (lowerC <= lowerR && lowerR < upperC) || (lowerC < upperR && upperR <= upperC) || (lowerR <= lowerC && upperR >= upperC)
+      }
+      case "<" | "<=" => {
+        // Edge Cases
+        if (row == 0 || col == 0) return true
+        if (row == verticalBoundaries.length || col == horizontalBoundaries.length) return true
+
+        // General Case
+        val lowerR = verticalBoundaries(row - 1)
+        val upperC = horizontalBoundaries(col)
+
+        lowerR < upperC
+      }
+      case ">" | ">=" => {
+        // Edge Cases
+        if (row == 0 || col == 0) return true
+        if (row == verticalBoundaries.length || col == horizontalBoundaries.length) return true
+
+        // General Case
+        val upperR = verticalBoundaries(row)
+        val lowerC = horizontalBoundaries(col - 1)
+
+        lowerC < upperR
+      }
     }
-    if (col == horizontalBoundaries.length) {
-      horizontalBoundaries(horizontalBoundaries.length - 1) < verticalBoundaries(row)
-    }
-
-    // General Case
-    val lowerR = verticalBoundaries(row - 1)
-    val upperR = verticalBoundaries(row)
-
-    val lowerC = horizontalBoundaries(col - 1)
-    val upperC = horizontalBoundaries(col)
-
-    (lowerC <= lowerR && lowerR < upperC) || (lowerC < upperR && upperR <= upperC)
   }
 
-  def totalCandidateArea(first: Int, last: Int): Int = {
+  def totalCandidateArea(first: Int, last: Int, op: String): Int = {
     var area = 0
     for (col <- horizontalCounts.indices) {
       for (row <- first to last) {
-        if (isCandidate(row, col)) area += 1
+        if (isCandidate(row, col, op)) area += 1
       }
     }
     area

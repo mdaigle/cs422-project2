@@ -46,6 +46,6 @@ object Main {
     val res = tj.theta_join(dataset1, dataset2, "num", "num", "=")
     
     println(res.count)
-    //res.saveAsTextFile(output)
+    res.saveAsTextFile(output)
   }     
 }

@@ -18,8 +18,8 @@ class ThetaJoinTest extends FlatSpec {
     val reducers = 10
     val maxInput = 1000 
     
-    val inputFile1="test/resources/input1_1K.csv"
-    val inputFile2="input2_1K.csv"
+    val inputFile1="../input1_1K.csv"
+    val inputFile2="../input2_1K.csv"
     
     val input1 = new File(getClass.getResource(inputFile1).getFile).getPath
     val input2 = new File(getClass.getResource(inputFile2).getFile).getPath
@@ -31,14 +31,14 @@ class ThetaJoinTest extends FlatSpec {
       .option("header", "true")
       .option("inferSchema", "true")
       .option("delimiter", ",")
-      .load(input1)
+      .load(inputFile1)
     
     val df2 = sqlContext.read
       .format("com.databricks.spark.csv")
       .option("header", "true")
       .option("inferSchema", "true")
       .option("delimiter", ",")
-      .load(input2)
+      .load(inputFile2)
     
     val rdd1 = df1.rdd
     val rdd2 = df2.rdd
